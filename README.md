@@ -1005,6 +1005,7 @@ bool isUnconscious = (shock >= blood - 550);
 - **Stance:** `[[entity + 0x7E8] + 0x110] + 0x1C8` (int: 0 stand, 1 crouch, 2 prone, 3-5 = aiming variants) is **1.28 data** (skeleton `0x7E8`). For 1.29+ use skeleton `0x7E0` (#8285 #8289). **[Needs Update for 1.29+]**
 - `Player::StatsContainer 0x6F0`, `PlayerStats::RecordValue 0x2C` (#8573 #8643). [Unverified]
 - The 1.28 damage-system description (EntityType+0x120 hash table with `Blood=5000`, `Shock=100`) appears only in #8303. **[Needs Update for 1.29+]**
+- **Player look direction (for ESP):** Read head bone position and forward vector from skeleton. Works even with freelook. Code in #8729 shows reading head bone (index 21 for players) and deriving look direction from bone matrix forward vector. [Single-source]
 
 ### 12.5 Finding GameVariables offset for 1.29+
 
