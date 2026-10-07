@@ -157,6 +157,14 @@ Unless stated otherwise, **"module RVA"** means an offset from the `DayZ_x64.exe
     1. [Reading Steam ID](#341-reading-steam-id)
     2. [Bot detection](#342-bot-detection)
     3. [Common issues with name reading](#343-common-issues-with-name-reading)
+35. [Player Look Direction](#35-player-look-direction)
+    1. [Overview](#351-overview)
+    2. [Eye bone technique](#352-eye-bone-technique)
+    3. [Key bones for look direction](#353-key-bones-for-look-direction)
+36. [Weapon Attachments](#36-weapon-attachments)
+    1. [Reading attached items](#361-reading-attached-items)
+    2. [Attachment offsets](#362-attachment-offsets)
+    3. [Internal magazine ammo](#363-internal-magazine-ammo)
 
 ---
 
@@ -2680,3 +2688,137 @@ Scoreboard = [NetworkClient + 0x18]
 ```
 
 **[Corroborated]** #8377 #8722
+
+---
+
+## 35. Player Look Direction
+
+### 35.1 Overview
+
+Player look direction (where they're aiming/looking) can be determined even with freelook using a bone-based technique.
+
+### 35.2 Eye bone technique
+
+Uses the left eye (bone 37), right eye (bone 38), and back of head (bone 49) to calculate look direction:
+
+```cpp
+bool GetPlayerHeadAndLook(uintptr_t entity, Vector3& outEye, Vector3& outLook) {
+    uintptr_t skeleton = Read<uintptr_t>(entity + 0x7E0);  // Player skeleton
+    uintptr_t visualState = Read<uintptr_t>(entity + 0x1C8);
+    if (!skeleton || !visualState) return false;
+    
+    // Read entity world transform
+    float vm[12];
+    ReadBuffer(visualState + 0x08, vm, 48);
+    
+    // Get animation class
+    uintptr_t animClass = Read<uintptr_t>(skeleton + 0x118);
+    if (!animClass) animClass = Read<uintptr_t>(skeleton + 0x180);  // fallback
+    if (!animClass) return false;
+    
+    uintptr_t matrixArray = Read<uintptr_t>(animClass + 0xBE8);
+    if (!matrixArray) return false;
+    
+    // Transform bone to world coordinates
+    auto boneToWorld = [&](int idx, Vector3& out) -> bool {
+        float bm[12];
+        ReadBuffer(matrixArray + idx * 48, bm, 48);
+        out.x = bm[10]*vm[3] + bm[9]*vm[0] + bm[11]*vm[6] + vm[9];
+        out.y = bm[10]*vm[4] + bm[9]*vm[1] + bm[11]*vm[7] + vm[10];
+        out.z = bm[10]*vm[5] + bm[9]*vm[2] + bm[11]*vm[8] + vm[11];
+        return true;
+    };
+    
+    Vector3 leftEye, rightEye, backHead;
+    if (!boneToWorld(37, leftEye)) return false;   // Left eye
+    if (!boneToWorld(38, rightEye)) return false;  // Right eye
+    if (!boneToWorld(49, backHead)) return false;  // Back of head
+    
+    // Eye position is midpoint between eyes
+    outEye.x = (leftEye.x + rightEye.x) * 0.5f;
+    outEye.y = (leftEye.y + rightEye.y) * 0.5f;
+    outEye.z = (leftEye.z + rightEye.z) * 0.5f;
+    
+    // Look direction is from back of head to eyes (normalized)
+    Vector3 fwd = { outEye.x - backHead.x, outEye.y - backHead.y, outEye.z - backHead.z };
+    float len = sqrtf(fwd.x*fwd.x + fwd.y*fwd.y + fwd.z*fwd.z);
+    if (len < 0.001f) return false;
+    
+    outLook = { fwd.x/len, fwd.y/len, fwd.z/len };
+    return true;
+}
+```
+
+**[Single-source]** #8729
+
+### 35.3 Key bones for look direction
+
+| Bone | Index | Description |
+|---|---|---|
+| Left Eye | 37 | Used with right eye to find eye midpoint |
+| Right Eye | 38 | Used with left eye to find eye midpoint |
+| Back of Head | 49 | Used to calculate forward direction |
+
+This technique works even when players use freelook because it's based on actual head bone positions rather than networked aim angles.
+
+---
+
+## 36. Weapon Attachments
+
+### 36.1 Reading attached items
+
+Items attached to weapons or other items (scopes, stocks, suppressors, etc.) can be read through the inventory system:
+
+```cpp
+std::vector<uintptr_t> GetAttachedItems(uintptr_t parentItem) {
+    std::vector<uintptr_t> attachments;
+    
+    // Get parent item's inventory
+    uintptr_t inventory = Read<uintptr_t>(parentItem + 0x650);
+    if (!inventory) return attachments;
+    
+    // Get attachment list
+    uintptr_t attachList = Read<uintptr_t>(inventory + 0x150);
+    uint16_t attachCount = Read<uint16_t>(inventory + 0x15C);
+    
+    for (int i = 0; i < attachCount; i++) {
+        uintptr_t attached = Read<uintptr_t>(attachList + 0x8 + i * 0x10);
+        if (attached) {
+            attachments.push_back(attached);
+        }
+    }
+    
+    return attachments;
+}
+```
+
+**[Single-source]** #8736
+
+### 36.2 Attachment offsets
+
+| Object | Offset | Type | Description |
+|---|---|---|---|
+| Item -> Inventory | `0x650` | ptr | Item's inventory component |
+| Inventory -> AttachList | `0x150` | ptr | Pointer to attached items array |
+| Inventory -> AttachCount | `0x15C` | uint16 | Number of attached items |
+| Attachment stride | `0x10` | - | 16 bytes per attachment entry |
+| Attachment ptr | `+0x08` | ptr | Actual item pointer in entry |
+
+### 36.3 Internal magazine ammo
+
+For weapons with internal magazines (Repeater Carbine, BK-133, SK, etc.):
+
+```cpp
+int GetInternalMagazineAmmo(uintptr_t weapon) {
+    uintptr_t chamberArray = Read<uintptr_t>(weapon + 0x6A8);
+    if (!chamberArray) return 0;
+    
+    uintptr_t magData = Read<uintptr_t>(chamberArray + 0x5C);  // or direct read
+    int currentAmmo = Read<int32_t>(chamberArray + 0x5C);
+    int maxAmmo = Read<int32_t>(chamberArray + 0x58);
+    
+    return currentAmmo;
+}
+```
+
+**[Single-source]** #8741
