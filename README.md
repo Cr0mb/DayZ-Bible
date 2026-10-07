@@ -1626,3 +1626,269 @@ Features likely to be detected (from thread discussion):
 - External/DMA is harder to detect than internal
 - Read-only features have lowest risk
 - Signature scan your offsets rather than hardcode (#8517)
+
+---
+
+## 22. Animals & Wildlife
+
+Animals in DayZ use the `dayzanimal` type and appear in the Near/Far entity tables alongside players and infected.
+
+### 22.1 Animal detection
+
+```cpp
+// Check if entity is an animal
+EntityType* type = Read<uintptr_t>(entity + 0x180);
+std::string typeName = ReadArmaString(Read<uintptr_t>(type + 0xD0));
+bool isAnimal = (typeName == "dayzanimal");
+```
+
+**Animal classification by model path** (`EntityType + 0xB0`):
+- Deer: `dz\animals\deer\`
+- Boar: `dz\animals\boar\`
+- Wolf: `dz\animals\wolf\`
+- Bear: `dz\animals\bear\`
+- Chicken: `dz\animals\chicken\`
+- Cow: `dz\animals\cattle\`
+- Goat: `dz\animals\goat\`
+- Sheep: `dz\animals\sheep\`
+- Pig: `dz\animals\pig\`
+- Rabbit: `dz\animals\rabbit\`
+
+### 22.2 Animal skeleton
+
+Animals use different skeleton structures than players/infected. The skeleton offset is **not** at `0x7E0` or `0x670`. Animal skeleton rendering requires finding the correct offset per animal type - this was not documented in the thread. **[Needs Update for 1.29+]**
+
+**Workaround:** Use VisualState position (`entity + 0x1C8 -> +0x2C`) for animal ESP without skeleton rendering.
+
+### 22.3 Hostile animal detection
+
+Wolves and bears are hostile. Detect by model path or CleanName:
+- Wolf: `Wolf` / `dz\animals\wolf\`
+- Bear: `Bear` / `dz\animals\bear\`
+
+Display hostile animals in red/warning color for player safety.
+
+---
+
+## 23. Base Building & Structures
+
+### 23.1 Base building entities
+
+Base building objects appear in the **SlowTable** (`World + 0x2010`) with type `house` or `DayZBuilding`.
+
+**Common base building items** (by CleanName `+0x518`):
+- `Fence` / `Watchtower` / `Gate`
+- `Barrel` / `Sea Chest` / `Wooden Crate`
+- `Flag Pole` / `Tent`
+
+### 23.2 Container detection
+
+Containers have nested inventories that can be read:
+
+```cpp
+uintptr_t containerInv = Read<uintptr_t>(container + 0x650);
+uintptr_t cargo = Read<uintptr_t>(containerInv + 0x148);
+uintptr_t cargoItems = Read<uintptr_t>(cargo + 0x38);
+uint16_t cargoCount = Read<uint16_t>(cargo + 0x44);
+
+for (int i = 0; i < cargoCount; i++) {
+    uintptr_t item = Read<uintptr_t>(cargoItems + 0x8 + i * 0x10);
+    // Read item name, quality, etc.
+}
+```
+
+### 23.3 Lock / code lock detection
+
+Code locks on base building elements are **server-side**. The combination is not stored client-side and cannot be read. (#8367 confirms server authority over security-sensitive data)
+
+**What you CAN read:**
+- Whether a structure exists
+- Structure type (Fence, Gate, etc.)
+- Structure position (VisualState)
+- Items stored in containers
+
+**What you CANNOT read:**
+- Lock combinations
+- Ownership information (server-side)
+- Raid protection timers
+
+---
+
+## 24. Memory Scanning & Pattern Development
+
+### 24.1 IDA Pro workflow
+
+1. Load `DayZ_x64.exe` with symbols if available
+2. Search for string references (e.g., `"World"`, `"Player"`, `"Camera"`)
+3. Find functions referencing those strings
+4. Trace back to global pointers
+5. Extract RIP-relative offsets
+
+### 24.2 ReClass workflow
+
+1. Attach to running DayZ process
+2. Start with known globals (World, NetworkManager)
+3. Expand child pointers to map structures
+4. Compare against known offsets from the thread
+5. Export as C++ headers
+
+### 24.3 Signature development
+
+**Pattern format** (IDA style):
+- `48 8B 05 ? ? ? ?` - `?` is wildcard byte
+- The `? ? ? ?` typically holds a RIP-relative offset
+
+**Extraction methods:**
+- **MovCs**: RIP-relative global - `addr = pattern_addr + 7 + *(int32*)(pattern_addr + 3)`
+- **MovReg**: 32-bit displacement embedded in instruction
+- **Direct**: Pattern points directly at function prologue
+
+**Pattern stability rules:**
+1. Avoid patterns with hard-coded relative addresses (e.g., `E8 19 6E 01 00`)
+2. Prefer patterns from unique instruction sequences
+3. Include enough context bytes to avoid false positives
+4. Test patterns across multiple builds
+
+### 24.4 Build-specific offset resolution
+
+```cpp
+// Example: Resolve World pointer from signature
+uintptr_t FindWorld(uintptr_t module) {
+    // Pattern: 4C 8B 05 ? ? ? ? 48 8B CF FF 50
+    const char* pattern = "\x4C\x8B\x05\x00\x00\x00\x00\x48\x8B\xCF\xFF\x50";
+    const char* mask = "xxx????xxxxx";
+    
+    uintptr_t addr = FindPattern(module, pattern, mask);
+    if (!addr) return 0;
+    
+    int32_t rip_offset = *(int32_t*)(addr + 3);
+    uintptr_t world_ptr = addr + 7 + rip_offset;
+    return Read<uintptr_t>(world_ptr);
+}
+```
+
+---
+
+## 25. Common Pitfalls & Debugging
+
+### 25.1 World pointer issues
+
+**Symptom:** World reads as 0 or garbage
+
+**Causes:**
+1. Using wrong RVA for current build
+2. Game not fully loaded (check in main menu, not loading screen)
+3. Reading the RVA as a pointer when it's an object address (NetworkManager)
+
+**Fix:** Signature scan for World instead of hard-coding RVA
+
+### 25.2 Entity table issues
+
+**Symptom:** Entity count is huge (millions) or negative
+
+**Causes:**
+1. Wrong offset for entity table
+2. World pointer invalid
+3. Reading count as wrong type (e.g., int64 instead of int32)
+
+**Fix:** Verify World first, then check table offsets. Count should be 0-100 typically.
+
+### 25.3 Name reading issues
+
+**Symptom:** Names are garbage or empty
+
+**Causes:**
+1. Wrong ArmaString layout (using `+0x0/+0x4` instead of `+0x8/+0x10`)
+2. Name pointer is null (entity hasn't been named yet)
+3. Reading from wrong offset (e.g., TypeName vs CleanName)
+
+**Fix:** Use `+0x8` for length, `+0x10` for chars. Check for null pointers.
+
+### 25.4 Skeleton issues
+
+**Symptom:** Bones render at entity origin or in wrong positions
+
+**Causes:**
+1. Not transforming from model space to world space
+2. Using wrong AnimClass offset (`0x118` vs `0x110` vs `0x90`)
+3. Using wrong bone base/stride convention
+
+**Fix:** Always multiply bone positions by entity world matrix. Use `0x118` for AnimClass.
+
+### 25.5 NetworkManager issues
+
+**Symptom:** Scoreboard always empty, NetworkClient is null
+
+**Causes:**
+1. **Common mistake:** Dereferencing NetworkManager RVA. It's an object, not a pointer!
+2. Not connected to server (scoreboard only exists in multiplayer)
+3. Double `+0x50` dereference
+
+**Fix:**
+```cpp
+// WRONG:
+uintptr_t nm = Read<uintptr_t>(module + NM_RVA);  // nm will be garbage
+
+// CORRECT:
+uintptr_t nm = module + NM_RVA;  // nm IS the NetworkManager object
+uintptr_t client = Read<uintptr_t>(nm + 0x50);
+```
+
+### 25.6 Position reading issues
+
+**Symptom:** All entities at (0,0,0) or same position
+
+**Causes:**
+1. Reading position from entity base instead of VisualState
+2. VisualState pointer is null (entity not rendered yet)
+3. Wrong position offset within VisualState
+
+**Fix:**
+```cpp
+uintptr_t vs = Read<uintptr_t>(entity + 0x1C8);
+if (!vs) continue;  // Entity not rendered
+Vector3 pos = Read<Vector3>(vs + 0x2C);
+```
+
+### 25.7 W2S projection issues
+
+**Symptom:** ESP boxes in wrong positions, drift when looking around
+
+**Causes:**
+1. Using wrong camera offsets
+2. ProjectionD1/D2 swapped or wrong components used
+3. Not updating camera data each frame
+4. Scope zoom not accounted for
+
+**Fix:** Read camera data every frame. Use ProjectionD1.x and ProjectionD2.y specifically.
+
+### 25.8 Memory access errors
+
+**Symptom:** Access violations, reads returning 0
+
+**Causes:**
+1. Process handle invalid or wrong access rights
+2. Target address is not mapped
+3. Entity has been destroyed (stale pointer)
+4. Anti-cheat blocking reads
+
+**Fix:**
+```cpp
+// Always check return values
+SIZE_T bytesRead;
+BOOL ok = ReadProcessMemory(h, addr, &buf, size, &bytesRead);
+if (!ok || bytesRead != size) {
+    // Handle error
+}
+```
+
+### 25.9 Update-proofing checklist
+
+When DayZ updates and offsets break:
+
+1. **First:** Check if World RVA changed (most common)
+2. **Second:** Verify entity table offsets (rarely change)
+3. **Third:** Check member offsets (skeleton, inventory, etc.)
+4. **Last:** Update signatures if hard-coded patterns broke
+
+Use the 106-pattern signature set from #8497 for auto-updating offsets
