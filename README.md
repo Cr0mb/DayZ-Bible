@@ -88,6 +88,75 @@ Unless stated otherwise, **"module RVA"** means an offset from the `DayZ_x64.exe
     1. [External features](#211-external-features)
     2. [Internal-only features](#212-internal-only-features)
     3. [Server-side / impossible features](#213-server-side--impossible-features)
+22. [Animals & Wildlife](#22-animals--wildlife)
+    1. [Animal detection](#221-animal-detection)
+    2. [Animal skeleton](#222-animal-skeleton)
+    3. [Hostile animal detection](#223-hostile-animal-detection)
+23. [Base Building & Structures](#23-base-building--structures)
+    1. [Base building entities](#231-base-building-entities)
+    2. [Container detection](#232-container-detection)
+    3. [Lock / code lock detection](#233-lock--code-lock-detection)
+24. [Memory Scanning & Pattern Development](#24-memory-scanning--pattern-development)
+    1. [IDA Pro workflow](#241-ida-pro-workflow)
+    2. [ReClass workflow](#242-reclass-workflow)
+    3. [Signature development](#243-signature-development)
+    4. [Build-specific offset resolution](#244-build-specific-offset-resolution)
+25. [Common Pitfalls & Debugging](#25-common-pitfalls--debugging)
+    1. [World pointer issues](#251-world-pointer-issues)
+    2. [Entity table issues](#252-entity-table-issues)
+    3. [Name reading issues](#253-name-reading-issues)
+    4. [Skeleton issues](#254-skeleton-issues)
+    5. [NetworkManager issues](#255-networkmanager-issues)
+    6. [Position reading issues](#256-position-reading-issues)
+    7. [W2S projection issues](#257-w2s-projection-issues)
+    8. [Memory access errors](#258-memory-access-errors)
+    9. [Update-proofing checklist](#259-update-proofing-checklist)
+26. [Heli Crash & Dynamic Event ESP](#26-heli-crash--dynamic-event-esp)
+    1. [Heli crash detection](#261-heli-crash-detection)
+    2. [Convoy / dynamic event detection](#262-convoy--dynamic-event-detection)
+    3. [Santa crash (Christmas event)](#263-santa-crash-christmas-event)
+27. [Admin Detection](#27-admin-detection)
+    1. [Admin detection overview](#271-admin-detection-overview)
+    2. [Scoreboard anomaly detection](#272-scoreboard-anomaly-detection)
+    3. [Admin clothing detection](#273-admin-clothing-detection)
+    4. [Limitations](#274-limitations)
+28. [Aimbot & Target Selection](#28-aimbot--target-selection)
+    1. [Target selection algorithm](#281-target-selection-algorithm)
+    2. [Mouse movement aimbot](#282-mouse-movement-aimbot)
+    3. [Aim prediction (lead calculation)](#283-aim-prediction-lead-calculation)
+    4. [Bone priority](#284-bone-priority)
+29. [Sample Code Templates](#29-sample-code-templates)
+    1. [Complete ESP loop template](#291-complete-esp-loop-template)
+    2. [Item table iteration template](#292-item-table-iteration-template)
+    3. [Skeleton rendering template](#293-skeleton-rendering-template)
+    4. [Player name resolution template](#294-player-name-resolution-template)
+30. [No Recoil & No Sway](#30-no-recoil--no-sway)
+    1. [Overview](#301-overview)
+    2. [Recoil offsets](#302-recoil-offsets)
+    3. [No recoil implementation](#303-no-recoil-implementation)
+    4. [No sway](#304-no-sway)
+    5. [Weapon dispersion (spread)](#305-weapon-dispersion-spread)
+31. [Freecam Implementation](#31-freecam-implementation)
+    1. [Overview](#311-overview)
+    2. [Freecam offsets](#312-freecam-offsets)
+    3. [Debug camera member offsets](#313-debug-camera-member-offsets)
+    4. [Enabling freecam](#314-enabling-freecam)
+    5. [Freecam movement](#315-freecam-movement)
+    6. [Freecam limitations](#316-freecam-limitations)
+32. [Speed Hack](#32-speed-hack)
+    1. [Overview](#321-overview)
+    2. [Speed hack offset](#322-speed-hack-offset)
+    3. [Tick-based implementation](#323-tick-based-implementation)
+    4. [Server kick issues](#324-server-kick-issues)
+    5. [Signature for speed hack offset](#325-signature-for-speed-hack-offset)
+33. [Server Info & Player Count](#33-server-info--player-count)
+    1. [Reading server name](#331-reading-server-name)
+    2. [Reading player count](#332-reading-player-count)
+    3. [Server name offset](#333-server-name-offset)
+34. [Steam ID & Bot Detection](#34-steam-id--bot-detection)
+    1. [Reading Steam ID](#341-reading-steam-id)
+    2. [Bot detection](#342-bot-detection)
+    3. [Common issues with name reading](#343-common-issues-with-name-reading)
 
 ---
 
@@ -1892,3 +1961,722 @@ When DayZ updates and offsets break:
 4. **Last:** Update signatures if hard-coded patterns broke
 
 Use the 106-pattern signature set from #8497 for auto-updating offsets
+
+---
+
+## 26. Heli Crash & Dynamic Event ESP
+
+### 26.1 Heli crash detection
+
+Heli crashes are in the **SlowTable** (`World + 0x2010`) with EntityType `house` or `DayZBuilding`.
+
+**Detection methods:**
+
+**Method 1: By model path** (catches all including modded):
+```cpp
+std::string modelPath = ReadArmaString(Read<uintptr_t>(type + 0xB0));
+std::transform(modelPath.begin(), modelPath.end(), modelPath.begin(), ::tolower);
+if (modelPath.find("dz\\structures\\wrecks\\aircraft") != std::string::npos) {
+    // This is a heli crash
+}
+```
+
+**Method 2: By type name** (more specific):
+```cpp
+std::string typeName = ReadArmaString(Read<uintptr_t>(type + 0xD0));
+static const std::unordered_set<std::string> heliTypes = {
+    "Wreck_UH1Y", "Wreck_Mi8", "Wreck_Mi17", 
+    "Wreck_Helicopter", "Wreck_AH1Z", "Wreck_Ka52", "Wreck_Mi24"
+};
+if (heliTypes.count(typeName)) {
+    // This is a heli crash
+}
+```
+
+**[Corroborated]** #8284 #8448 #8449 #8454
+
+### 26.2 Convoy / dynamic event detection
+
+Convoys and other dynamic events also appear in SlowTable.
+
+```cpp
+// Convoy detection by type name suffix
+if (typeName.find("BRDM_DE") != std::string::npos ||
+    typeName.find("Ural_DE") != std::string::npos) {
+    // This is a convoy event
+}
+
+// Alternative: match on wreck_decal in model path
+if (modelPath.find("wreck_decal") != std::string::npos) {
+    // Dynamic event decal
+}
+```
+
+**[Single-source]** #8590 #8599
+
+### 26.3 Santa crash (Christmas event)
+
+The Santa crash helicopter uses the same model path filter as regular heli crashes (`dz\structures\wrecks\aircraft`).
+
+**[Single-source]** #8284
+
+---
+
+## 27. Admin Detection
+
+### 27.1 Admin detection overview
+
+Admin detection is challenging because admins can use various invisibility methods. Three approaches are documented:
+
+1. **Scoreboard anomaly**: Player in scoreboard but not in entity tables
+2. **SlowTable check**: Entity in slow table (deprecated, high false positives in 1.28+)
+3. **Clothing match**: Check for admin framework clothing items
+
+### 27.2 Scoreboard anomaly detection
+
+```cpp
+// Build a set of all entity NetworkIDs from Near/Far tables
+std::unordered_set<uint32_t> entityNetIds;
+// ... iterate Near and Far tables, add each entity's NetworkID (entity + 0x6DC)
+
+// Check scoreboard
+uintptr_t nm = module + NETWORK_MANAGER_RVA;
+uintptr_t client = Read<uintptr_t>(nm + 0x50);
+uintptr_t scoreboard = Read<uintptr_t>(client + 0x18);
+int count = Read<int32_t>(client + 0x24);
+
+for (int i = 0; i < count; i++) {
+    uintptr_t identity = Read<uintptr_t>(scoreboard + i * 8);
+    uint32_t netId = Read<uint32_t>(identity + 0x30);
+    std::string name = ReadArmaString(Read<uintptr_t>(identity + 0xF8));
+    
+    // If in scoreboard but NOT in entity tables = potential invisible admin
+    if (!entityNetIds.count(netId)) {
+        // Possible admin using invisibility
+    }
+}
+```
+
+**[Single-source]** #8470 #8472. Note: VPP admin invisibility may not appear in SlowTable either (#8241 #8246).
+
+### 27.3 Admin clothing detection
+
+Check player inventory for admin-specific items (server/mod dependent):
+
+```cpp
+// Read player cargo and equipped items
+// Compare item names against known admin item patterns
+// E.g., "AdminTool", "VPP_AdminTag", etc.
+```
+
+**[Single-source]** #8473
+
+### 27.4 Limitations
+
+- Invisible admins using VPP tools may not appear in ANY table (#8241)
+- Admin detection is mod-specific - each server uses different admin frameworks
+- False positives possible with slow table method
+- Cannot detect admins who are simply "invisible" via script
+
+---
+
+## 28. Aimbot & Target Selection
+
+### 28.1 Target selection algorithm
+
+```cpp
+Entity* GetEntityNearCrosshair(float fovRadius, int targetBone) {
+    float centerX = screenWidth / 2.0f;
+    float centerY = screenHeight / 2.0f;
+    
+    Entity* bestTarget = nullptr;
+    float bestDist = fovRadius;
+    
+    for (Entity& ent : entities) {
+        if (ent.IsDead()) continue;
+        
+        Vector3 bonePos = GetBoneWorld(ent, targetBone);
+        Vector2 screenPos;
+        if (!WorldToScreen(bonePos, screenPos)) continue;
+        
+        float dist = sqrt(pow(screenPos.x - centerX, 2) + 
+                          pow(screenPos.y - centerY, 2));
+        
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestTarget = &ent;
+        }
+    }
+    return bestTarget;
+}
+```
+
+### 28.2 Mouse movement aimbot
+
+External aimbots use OS-level mouse input:
+
+```cpp
+void AimAtTarget(Vector2 targetScreen) {
+    float centerX = screenWidth / 2.0f;
+    float centerY = screenHeight / 2.0f;
+    
+    float deltaX = targetScreen.x - centerX;
+    float deltaY = targetScreen.y - centerY;
+    
+    // Apply smoothing
+    deltaX /= smoothFactor;
+    deltaY /= smoothFactor;
+    
+    // Move mouse
+    INPUT input = {};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE;
+    input.mi.dx = (LONG)deltaX;
+    input.mi.dy = (LONG)deltaY;
+    SendInput(1, &input, sizeof(INPUT));
+}
+```
+
+**[Corroborated]** #8498
+
+### 28.3 Aim prediction (lead calculation)
+
+For moving targets, predict where they'll be when the bullet arrives:
+
+```cpp
+Vector3 PredictPosition(Vector3 targetPos, Vector3 targetVelocity, 
+                        Vector3 localPos, float bulletSpeed) {
+    float distance = (targetPos - localPos).Length();
+    float travelTime = distance / bulletSpeed;
+    
+    // Simple linear prediction
+    return targetPos + (targetVelocity * travelTime);
+}
+```
+
+**Target velocity**: Read from `VisualState + 0x54` **[Single-source]** #8438 #8535
+
+### 28.4 Bone priority
+
+Common bone targeting priorities:
+
+| Bone | Index (Set A) | Purpose |
+|---|---|---|
+| Head | 24 | Maximum damage |
+| Neck | 21 | High damage, larger hitbox |
+| Spine2 | 20 | Center mass, reliable |
+| Pelvis | 0 | Center mass, stable |
+
+Bone **49** is reported as "between the eyes" / front of head (#8614 #8618).
+
+---
+
+## 29. Sample Code Templates
+
+### 29.1 Complete ESP loop template
+
+```cpp
+void RenderESP() {
+    uintptr_t world = Read<uintptr_t>(module + WORLD_RVA);
+    if (!world) return;
+    
+    Camera cam = ReadCamera(world);
+    
+    // Near entities
+    uintptr_t nearList = Read<uintptr_t>(world + 0xF48);
+    int nearCount = Read<int32_t>(world + 0xF50);
+    
+    for (int i = 0; i < nearCount; i++) {
+        uintptr_t entity = Read<uintptr_t>(nearList + i * 8);
+        RenderEntity(entity, cam);
+    }
+    
+    // Far entities
+    uintptr_t farList = Read<uintptr_t>(world + 0x1090);
+    int farCount = Read<int32_t>(world + 0x1098);
+    
+    for (int i = 0; i < farCount; i++) {
+        uintptr_t entity = Read<uintptr_t>(farList + i * 8);
+        RenderEntity(entity, cam);
+    }
+}
+
+void RenderEntity(uintptr_t entity, const Camera& cam) {
+    if (!entity) return;
+    
+    // Check if dead
+    uint8_t isDead = Read<uint8_t>(entity + 0xE2);
+    if (isDead & 0x01) return;  // Skip dead entities
+    
+    // Get position
+    uintptr_t vs = Read<uintptr_t>(entity + 0x1C8);
+    if (!vs) return;
+    Vector3 pos = Read<Vector3>(vs + 0x2C);
+    
+    // Get type
+    uintptr_t type = Read<uintptr_t>(entity + 0x180);
+    std::string typeName = ReadArmaString(Read<uintptr_t>(type + 0xD0));
+    
+    // World to screen
+    Vector2 screen;
+    if (!WorldToScreen(pos, screen, cam)) return;
+    
+    // Draw based on type
+    if (typeName == "dayzplayer") {
+        DrawPlayerESP(entity, screen, cam);
+    } else if (typeName == "dayzinfected") {
+        DrawZombieESP(entity, screen, cam);
+    }
+}
+```
+
+### 29.2 Item table iteration template
+
+```cpp
+void IterateItems() {
+    uintptr_t world = Read<uintptr_t>(module + WORLD_RVA);
+    
+    uintptr_t itemData = Read<uintptr_t>(world + 0x2060);
+    int capacity = Read<int32_t>(world + 0x2068);
+    
+    for (int i = 0; i < capacity; i++) {
+        uintptr_t slot = itemData + i * 0x18;
+        uint32_t state = Read<uint32_t>(slot);
+        
+        if (state != 1) continue;  // Skip invalid slots
+        
+        uintptr_t item = Read<uintptr_t>(slot + 0x8);
+        if (!item) continue;
+        
+        // Get item name
+        uintptr_t type = Read<uintptr_t>(item + 0x180);
+        std::string name = ReadArmaString(Read<uintptr_t>(type + 0x518));
+        
+        // Get position
+        uintptr_t vs = Read<uintptr_t>(item + 0x1C8);
+        if (!vs) continue;
+        Vector3 pos = Read<Vector3>(vs + 0x2C);
+        
+        // Get quality
+        int quality = Read<int32_t>(item + 0x194);
+        
+        // Process item...
+    }
+}
+```
+
+### 29.3 Skeleton rendering template
+
+```cpp
+void DrawSkeleton(uintptr_t entity, const Camera& cam, bool isZombie) {
+    static const int playerBones[][2] = {
+        {0, 19}, {19, 20}, {20, 21}, {21, 24},     // Spine to head
+        {21, 61}, {61, 63}, {63, 65},              // Left arm
+        {21, 94}, {94, 97}, {97, 99},              // Right arm
+        {0, 1}, {1, 4}, {4, 6},                     // Left leg
+        {0, 9}, {9, 12}, {12, 14}                   // Right leg
+    };
+    
+    uintptr_t skelOffset = isZombie ? 0x670 : 0x7E0;
+    uintptr_t skel = Read<uintptr_t>(entity + skelOffset);
+    if (!skel) return;
+    
+    uintptr_t anim = Read<uintptr_t>(skel + 0x118);
+    if (!anim) return;
+    
+    uintptr_t bones = Read<uintptr_t>(anim + 0xBE8);
+    if (!bones) return;
+    
+    // Read entity world matrix
+    uintptr_t vs = Read<uintptr_t>(entity + 0x1C8);
+    float worldMat[12];
+    ReadBuffer(vs + 0x08, worldMat, sizeof(worldMat));
+    
+    for (auto& pair : playerBones) {
+        Vector3 b1 = GetBoneWorld(bones, pair[0], worldMat);
+        Vector3 b2 = GetBoneWorld(bones, pair[1], worldMat);
+        
+        Vector2 s1, s2;
+        if (WorldToScreen(b1, s1, cam) && WorldToScreen(b2, s2, cam)) {
+            DrawLine(s1, s2, color);
+        }
+    }
+}
+
+Vector3 GetBoneWorld(uintptr_t bones, int idx, float* m) {
+    Vector3 local = Read<Vector3>(bones + 0x54 + idx * 0x30);
+    return {
+        m[0]*local.x + m[3]*local.y + m[6]*local.z + m[9],
+        m[1]*local.x + m[4]*local.y + m[7]*local.z + m[10],
+        m[2]*local.x + m[5]*local.y + m[8]*local.z + m[11]
+    };
+}
+```
+
+### 29.4 Player name resolution template
+
+```cpp
+std::string GetPlayerName(uintptr_t entity) {
+    uint32_t entityNetId = Read<uint32_t>(entity + 0x6DC);
+    
+    uintptr_t nm = module + NETWORK_MANAGER_RVA;
+    uintptr_t client = Read<uintptr_t>(nm + 0x50);
+    if (!client) return "";
+    
+    uintptr_t scoreboard = Read<uintptr_t>(client + 0x18);
+    int count = Read<int32_t>(client + 0x24);
+    
+    for (int i = 0; i < count; i++) {
+        uintptr_t identity = Read<uintptr_t>(scoreboard + i * 8);
+        uint32_t netId = Read<uint32_t>(identity + 0x30);
+        
+        if (netId == entityNetId) {
+            return ReadArmaString(Read<uintptr_t>(identity + 0xF8));
+        }
+    }
+    return "";  // Player not in scoreboard
+}
+```
+
+---
+
+## 30. No Recoil & No Sway
+
+### 30.1 Overview
+
+No recoil and no sway require **internal** or **external write access** to work. These features cannot be implemented read-only.
+
+### 30.2 Recoil offsets
+
+The InputController embedded struct on DayZPlayer controls recoil:
+
+| Offset | Type | Description |
+|---|---|---|
+| `Player + 0x828` | ptr | InputController embedded struct base |
+| `InputCtrl + 0x10` | float | Recoil Pitch |
+| `InputCtrl + 0x14` | float | Recoil Yaw |
+| `InputCtrl + 0x18` | float | Recoil Roll |
+| `InputCtrl + 0x818` | uint8 | isRecoilActive flag |
+| `InputCtrl + 0x820` | int32 | recoilSeed / step |
+
+The held weapon entity also stores recoil impulse values:
+
+| Offset | Type | Description |
+|---|---|---|
+| `HeldWeapon + 0x390` | float | Recoil Pitch Impulse |
+| `HeldWeapon + 0x394` | float | Recoil Yaw Impulse |
+
+**[Single-source]** #8720
+
+### 30.3 No recoil implementation
+
+```cpp
+#define INPUTCTRL_PTR 0x828
+
+void ApplyNoRecoil(uintptr_t localPlayer) {
+    uintptr_t inputCtrl = localPlayer + INPUTCTRL_PTR;
+    if (!IsValid(inputCtrl)) return;
+    
+    // Zero input controller recoil values
+    Write<float>(inputCtrl + 0x10, 0.0f);       // Recoil Pitch
+    Write<float>(inputCtrl + 0x14, 0.0f);       // Recoil Yaw
+    Write<float>(inputCtrl + 0x18, 0.0f);       // Recoil Roll
+    Write<uint8_t>(inputCtrl + 0x818, 0);       // isRecoilActive = 0
+    Write<int32_t>(inputCtrl + 0x820, 0);       // recoilSeed / step = 0
+    
+    // Also zero held weapon entity recoil vector
+    uintptr_t inv = Read<uintptr_t>(localPlayer + OFF_Inventory);
+    if (!IsValid(inv)) return;
+    
+    uintptr_t held = Read<uintptr_t>(inv + OFF_Inhands);
+    if (!IsValid(held)) return;
+    
+    Write<float>(held + 0x390, 0.0f);           // Recoil Pitch Impulse
+    Write<float>(held + 0x394, 0.0f);           // Recoil Yaw Impulse
+}
+```
+
+### 30.4 No sway
+
+Sway offsets are reported as being "right above" recoil in the InputController struct. The exact offsets are not well documented in the thread.
+
+**[Single-source]** #8017 #8036
+
+### 30.5 Weapon dispersion (spread)
+
+Bullet spread can be read from the weapon:
+
+| Offset | Type | Description |
+|---|---|---|
+| `Weapon + 0x3A4` | float | dispersion (bullet spread) |
+
+**[Single-source]** #8349
+
+---
+
+## 31. Freecam Implementation
+
+### 31.1 Overview
+
+Freecam is an **internal-only** feature that requires code patching. External implementations are extremely difficult due to input system complexity.
+
+### 31.2 Freecam offsets
+
+| RVA | Description |
+|---|---|
+| `0xF59988` | CameraMode (3 = Debug/Freecam) |
+| `0xF59A18` | CameraActive |
+| `0x483390` | FreeDebugCamera::GetInstance() function |
+| `0xF29EF8` | Global FreeDebugCamera instance pointer |
+| `0xF599F0` | DebugCameraTargetPos |
+| `0xF599B4` | DebugCameraStartPos |
+| `0xF599D0` | RotationSource1 (Right at +0x0, Up at +0x10) |
+| `0xF59994` | RotationSource2 (alternate source) |
+| `0x87C034` | CameraUpdatePatch (NOP to disable engine updates) |
+| `0x482420` | InputHandlerPatch (RET to disable input) |
+
+**[Single-source]** #8211
+
+### 31.3 Debug camera member offsets
+
+| Offset | Type | Description |
+|---|---|---|
+| `+0x18` | Vector3 | Right vector |
+| `+0x24` | Vector3 | Up vector |
+| `+0x2C` | Vector3 | Position |
+| `+0x30` | Vector3 | Forward vector |
+| `+0x3C` | float | Position X |
+| `+0x40` | float | Position Y |
+| `+0x44` | float | Position Z |
+
+### 31.4 Enabling freecam
+
+```cpp
+void EnableFreecam(uintptr_t base) {
+    static uint8_t originalBytes[5] = {0};
+    static bool bytesBackedUp = false;
+    
+    // Backup and set camera mode to debug (3)
+    int originalMode = Read<int>(base + 0xF59988);
+    Write<int>(base + 0xF59988, 3);
+    
+    // Patch camera update function (NOP 5 bytes)
+    uintptr_t patchAddr = base + 0x87C034;
+    if (!bytesBackedUp) {
+        for (int i = 0; i < 5; i++) 
+            originalBytes[i] = Read<uint8_t>(patchAddr + i);
+        bytesBackedUp = true;
+    }
+    
+    DWORD oldProtect;
+    VirtualProtect((void*)patchAddr, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+    for (int i = 0; i < 5; i++) 
+        *(uint8_t*)(patchAddr + i) = 0x90;  // NOP
+    VirtualProtect((void*)patchAddr, 5, oldProtect, &oldProtect);
+    
+    // Patch input handler (RET immediately)
+    uintptr_t inputPatch = base + 0x482420;
+    VirtualProtect((void*)inputPatch, 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+    *(uint8_t*)inputPatch = 0xC3;  // RET
+    VirtualProtect((void*)inputPatch, 1, oldProtect, &oldProtect);
+}
+```
+
+### 31.5 Freecam movement
+
+```cpp
+void UpdateFreecam(uintptr_t base, Vector3& pos, float yaw, float pitch, float speed) {
+    uintptr_t debugCam = Read<uintptr_t>(base + 0xF29EF8);
+    if (!IsValid(debugCam)) return;
+    
+    // Calculate rotation vectors
+    float cosP = cosf(pitch), sinP = sinf(pitch);
+    float cosY = cosf(yaw), sinY = sinf(yaw);
+    
+    Vector3 fwd = { cosP * sinY, sinP, cosP * cosY };
+    Vector3 rgt = { cosY, 0.0f, -sinY };
+    Vector3 up  = { rgt.z * fwd.y - rgt.y * fwd.z,
+                    rgt.x * fwd.z - rgt.z * fwd.x,
+                    rgt.y * fwd.x - rgt.x * fwd.y };
+    
+    // Write rotation to debug camera
+    Write<Vector3>(debugCam + 0x18, rgt);
+    Write<Vector3>(debugCam + 0x24, up);
+    Write<Vector3>(debugCam + 0x30, fwd);
+    
+    // Movement
+    if (GetAsyncKeyState('W') & 0x8000) pos = pos + fwd * speed;
+    if (GetAsyncKeyState('S') & 0x8000) pos = pos - fwd * speed;
+    if (GetAsyncKeyState('D') & 0x8000) pos = pos + rgt * speed;
+    if (GetAsyncKeyState('A') & 0x8000) pos = pos - rgt * speed;
+    
+    Write<Vector3>(debugCam + 0x2C, pos);
+}
+```
+
+### 31.6 Freecam limitations
+
+- **Internal only**: Requires memory patching
+- **Player body visible**: Your character remains visible to others at original position
+- **Actions limited**: Some actions (grenade throwing) stopped working in recent patches (#8477 #8485)
+- **Distance looting**: Looting beyond ~10m may not work in 1.29+ (#8493)
+
+---
+
+## 32. Speed Hack
+
+### 32.1 Overview
+
+Speed hacks manipulate the game tick rate. This is a **write** feature and is detectable.
+
+### 32.2 Speed hack offset
+
+| RVA | Description |
+|---|---|
+| `0xFF49C8` | Speedhack tick offset (build-dependent) |
+| `0xFF3958` | Alternative speedhack tick offset |
+| `0x11A074` | Newer build speedhack offset |
+
+**[Conflicting]** Multiple offsets reported across builds
+
+### 32.3 Tick-based implementation
+
+```cpp
+constexpr float DEFAULT_TICK = 1.0f;
+constexpr float SPEED_MULTIPLIER = 2.0f;  // 2x speed
+
+void ToggleSpeedHack(uintptr_t base, bool enable) {
+    uintptr_t tickAddr = base + 0xFF49C8;  // Verify for your build
+    
+    if (enable) {
+        Write<float>(tickAddr, DEFAULT_TICK * SPEED_MULTIPLIER);
+    } else {
+        Write<float>(tickAddr, DEFAULT_TICK);
+    }
+}
+```
+
+**[Single-source]** #8229 #15817
+
+### 32.4 Server kick issues
+
+Speed hacks are heavily monitored and most modded servers will kick for abnormal tick rates:
+
+> "i could never seem to figure out why even modded servers kick me when i speedhack"
+
+**Workaround**: Use very small increments to avoid detection:
+
+> "very difficult to-do speed hack with tick its possible but you have to-do very small increments"
+
+**[Single-source]** #8229
+
+### 32.5 Signature for speed hack offset
+
+From the updater logs:
+```
+[UPDATER] Modbase::Speedhack -> 0x3487D4   // Build A
+[UPDATER] Modbase::Speedhack -> 0x347BD4   // Build B  
+[UPDATER] Modbase::Speedhack -> 0x11A074   // Build C
+```
+
+Use pattern scanning to find the current offset for your build.
+
+---
+
+## 33. Server Info & Player Count
+
+### 33.1 Reading server name
+
+```cpp
+std::string GetServerName() {
+    uintptr_t nm = module + NETWORK_MANAGER_RVA;
+    uintptr_t client = Read<uintptr_t>(nm + 0x50);
+    if (!client) return "";
+    
+    uintptr_t serverNameStr = Read<uintptr_t>(client + 0x340);
+    if (!serverNameStr) return "";
+    
+    return ReadArmaString(serverNameStr);
+}
+```
+
+**[Single-source]** #8184
+
+### 33.2 Reading player count
+
+```cpp
+int GetPlayerCount() {
+    uintptr_t nm = module + NETWORK_MANAGER_RVA;
+    uintptr_t client = Read<uintptr_t>(nm + 0x50);
+    if (!client) return 0;
+    
+    return Read<int32_t>(client + 0x24);
+}
+```
+
+**[Corroborated]** #8184 #8722
+
+### 33.3 Server name offset
+
+| Offset | Type | Description |
+|---|---|---|
+| `NetworkClient + 0x340` | ptr | Server name ArmaString |
+| `NetworkClient + 0x24` | int32 | Player count (scoreboard size) |
+
+---
+
+## 34. Steam ID & Bot Detection
+
+### 34.1 Reading Steam ID
+
+Steam ID is available on the scoreboard identity struct:
+
+| Offset | Type | Description |
+|---|---|---|
+| `Identity + 0xA0` | ptr | SteamID ArmaString pointer |
+| `Identity + 0x38` | uint64 | GUID (alternative) |
+
+```cpp
+std::string GetSteamID(uintptr_t identity) {
+    uintptr_t steamPtr = Read<uintptr_t>(identity + 0xA0);
+    if (!steamPtr) return "";
+    
+    // ArmaString: text at +0x10
+    return ReadString(steamPtr + 0x10, 64);
+}
+```
+
+**[Corroborated]** #8206 #8349 #8377
+
+### 34.2 Bot detection
+
+Bots (AI players from mods like Expansion) do not have valid Steam IDs. Check for empty or invalid Steam ID:
+
+```cpp
+bool IsBot(uintptr_t identity) {
+    std::string steamId = GetSteamID(identity);
+    return steamId.empty() || steamId.length() < 10;
+}
+```
+
+> "Simplest way to check for bots to check for if they have a valid steam ID"
+
+**[Single-source]** #8377
+
+### 34.3 Common issues with name reading
+
+**Issue**: All players show as "BOT"
+
+**Causes**:
+1. Wrong pointer chain (adding +0x50 twice to NetworkManager)
+2. Not dereferencing ArmaString correctly (text is at `ptr + 0x10`, not `ptr`)
+3. Reading NetworkID from wrong offset
+
+**Solution**: Verify the chain:
+```
+NetworkManager = module + NM_RVA  // NOT a pointer, it's at this address
+NetworkClient = [NetworkManager + 0x50]
+Scoreboard = [NetworkClient + 0x18]
+```
+
+**[Corroborated]** #8377 #8722
